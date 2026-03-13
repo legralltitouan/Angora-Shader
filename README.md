@@ -72,5 +72,5 @@ Distributed under the **Angora Shader License 1.0 (Angora-NC-MN)**.
 - **Non-Commercial only.**
 - **Mandatory Notification:** If you distribute a modified version, you must notify the original creator.
 
-**Creator:** [Your Name]  
-**Contact:** [Your Email/Social Link]
+**Creator:** [Titouan LE GRALL]  
+**Contact:** [legralltitouan@gmail.com]
