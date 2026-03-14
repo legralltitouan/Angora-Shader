@@ -53,7 +53,7 @@ A high-end Non-Photorealistic Rendering (NPR) toolkit for **Blender 5.0.0**. Ins
 ### Render Results
 | Raw Mesh | Angora Applied |
 | :---: | :---: |
-| [Placeholder Image] | [Placeholder Image] |
+| ![Raw](1.png) | ![Angora](2.png) |
 
 ---
 
