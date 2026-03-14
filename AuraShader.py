@@ -741,66 +741,210 @@ class OBJECT_OT_remove_organized_paint(bpy.types.Operator):
         return {'FINISHED'}
 
 # ==========================================
-# 9. OPÉRATEUR POUR CONFIGURER LES PRÉ-REQUIS DE SCÈNE
+# 9. OPÉRATEURS DE CONFIGURATION SÉPARÉS
 # ==========================================
-class OBJECT_OT_setup_scene_prereqs(bpy.types.Operator):
-    """Configure le rendu Eevee et le shader ciel avec background bleu et noir"""
-    bl_idname = "scene.setup_prereqs"
-    bl_label = "Configurer les Pré-requis de la Scène"
+
+class SCENE_OT_setup_render_prereqs(bpy.types.Operator):
+    bl_idname = "scene.setup_render_prereqs"
+    bl_label = "Configurer Rendu & RT"
+    
+    def execute(self, context):
+        scene = context.scene
+        scene.render.engine = 'BLENDER_EEVEE'
+        scene.view_settings.view_transform = 'Standard'
+
+        # Active le Raytracing selon la version de Blender
+        if hasattr(scene.eevee, "use_raytracing"): # Blender 4.2+
+            scene.eevee.use_raytracing = True
+        elif hasattr(scene.eevee, "use_ssr"):      # Blender < 4.2
+            scene.eevee.use_ssr = True
+            scene.eevee.use_gtao = True 
+            
+        return {'FINISHED'}
+
+class SCENE_OT_setup_sky_shader(bpy.types.Operator):
+    """Configure uniquement le shader ciel (World)"""
+    bl_idname = "scene.setup_sky_shader"
+    bl_label = "Configurer Shader Ciel"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         scene = context.scene
-
-        # --- Rendu ---
-        scene.render.engine = 'BLENDER_EEVEE'
-        scene.view_settings.view_transform = 'Standard'
-
-        # --- Shader ciel ---
-        world = scene.world
-        if not world:
-            world = bpy.data.worlds.new("World")
-            scene.world = world
+        world = scene.world or bpy.data.worlds.new("World")
+        scene.world = world
         world.use_nodes = True
         nodes = world.node_tree.nodes
         links = world.node_tree.links
         nodes.clear()
 
-        # Nodes background noir et bleu
+        # Création des nodes pour le mélange technique
         bg_black = nodes.new("ShaderNodeBackground")
-        bg_black.location = (-200, 100)
-        bg_black.inputs['Color'].default_value = (0, 0, 0, 1)
+        bg_black.inputs['Color'].default_value = (0, 0, 0, 1) # Pour l'éclairage
 
         bg_color = nodes.new("ShaderNodeBackground")
-        bg_color.location = (-200, -100)
-        bg_color.inputs['Color'].default_value = scene.prereq_bg_color  # dynamique
+        bg_color.inputs['Color'].default_value = scene.prereq_bg_color # Pour la caméra
 
-        # Light path pour distinguer la caméra
         light_path = nodes.new("ShaderNodeLightPath")
-        light_path.location = (-400, 0)
-
-        # Mix shader entre noir et bleu
         mix_shader = nodes.new("ShaderNodeMixShader")
-        mix_shader.location = (0, 0)
-
-        # Output world
         output = nodes.new("ShaderNodeOutputWorld")
-        output.location = (200, 0)
 
-        # Liens nodes
+        # Liens : Bleu si vu par la caméra, noir pour le reste
         links.new(light_path.outputs['Is Camera Ray'], mix_shader.inputs['Fac'])
         links.new(bg_black.outputs['Background'], mix_shader.inputs[1])
         links.new(bg_color.outputs['Background'], mix_shader.inputs[2])
         links.new(mix_shader.outputs['Shader'], output.inputs['Surface'])
 
-        self.report({'INFO'}, "Pré-requis de la scène appliqués")
+        self.report({'INFO'}, "Shader Ciel appliqué")
         return {'FINISHED'}
+    
+class SCENE_OT_setup_compositing_prereqs(bpy.types.Operator):
+    """Configure le post-process Kuwahara + Diamond Sharpen"""
+    bl_idname = "scene.setup_compositing_prereqs"
+    bl_label = "Configurer Post-Process"
+    bl_options = {'REGISTER', 'UNDO'}
 
+    def execute(self, context):
+
+        scene = context.scene
+
+        # -------------------------------------------------
+        # Détection version Blender
+        # -------------------------------------------------
+
+        if hasattr(scene, "node_tree"):  # Blender 3 / 4
+            scene.use_nodes = True
+            nt = scene.node_tree
+            is_scene_tree = True
+
+        else:  # Blender 5+
+            if not scene.compositing_node_group:
+                scene.compositing_node_group = bpy.data.node_groups.new(
+                    name="Compositor",
+                    type="CompositorNodeTree"
+                )
+
+            nt = scene.compositing_node_group
+            is_scene_tree = False
+
+        nodes = nt.nodes
+        links = nt.links
+        nodes.clear()
+
+        # -------------------------------------------------
+        # Blender 5 : créer les sockets du node group
+        # -------------------------------------------------
+
+        if not is_scene_tree:
+
+            # supprimer sockets existants
+            if hasattr(nt, "interface"):
+                for item in list(nt.interface.items_tree):
+                    nt.interface.remove(item)
+
+                # socket sortie image
+                nt.interface.new_socket(
+                    name="Image",
+                    in_out='OUTPUT',
+                    socket_type='NodeSocketColor'
+                )
+
+        # -------------------------------------------------
+        # Nodes
+        # -------------------------------------------------
+
+        # Render Layers
+        rl = nodes.new("CompositorNodeRLayers")
+        rl.location = (-500, 0)
+
+        # Premier sharpen
+        filt1 = nodes.new("CompositorNodeFilter")
+        filt1.location = (-250, 0)
+        filt1.inputs[1].default_value = 0.35
+        filt1.inputs[2].default_value = 'Diamond Sharpen'
+
+        # Kuwahara
+        try:
+            kuwa = nodes.new("CompositorNodeKuwahara")
+            
+            # Size
+            kuwa.inputs[1].default_value = 8.0
+
+            # Uniformity (4 → 5)
+            kuwa.inputs[3].default_value = 5
+
+            # Eccentricity (réduit à 0.8)
+            kuwa.inputs[5].default_value = 0.8
+            
+        except:
+            kuwa = nodes.new("CompositorNodeBlur")
+            kuwa.label = "Kuwahara Fallback"
+
+        kuwa.location = (0, 0)
+
+        # Deuxième sharpen
+        filt2 = nodes.new("CompositorNodeFilter")
+        filt2.location = (250, 0)
+        filt2.inputs[1].default_value = 1.0
+        filt2.inputs[2].default_value = 'Diamond Sharpen'
+        
+        # Mix Color
+        mix = nodes.new("ShaderNodeMix")
+        mix.data_type = 'RGBA'
+        mix.blend_type = 'MIX'
+        mix.inputs[0].default_value = 0.5
+        mix.location = (450, 0)
+
+        # Deuxième Kuwahara
+        kuwa2 = nodes.new("CompositorNodeKuwahara")
+
+        kuwa2.inputs[1].default_value = 20.0
+        kuwa2.inputs[3].default_value = 5
+        kuwa2.inputs[5].default_value = 0.8
+
+        kuwa2.location = (200, -200)
+
+        # Output
+        if is_scene_tree:
+            out = nodes.new("CompositorNodeComposite")
+        else:
+            out = nodes.new("NodeGroupOutput")
+
+        out.location = (500, 0)
+
+        # Viewer uniquement Blender 3 / 4
+        if is_scene_tree:
+            viewer = nodes.new("CompositorNodeViewer")
+            viewer.location = (500, 200)
+
+        # -------------------------------------------------
+        # Links
+        # -------------------------------------------------
+
+        links.new(rl.outputs[0], filt1.inputs[0])
+        links.new(filt1.outputs[0], kuwa.inputs[0])
+        links.new(kuwa.outputs[0], filt2.inputs[0])
+        links.new(mix.outputs[2], out.inputs[0])
+
+        # Filter2 -> Mix A
+        links.new(filt2.outputs[0], mix.inputs[6])
+
+        # Render Layers -> Kuwahara2
+        links.new(rl.outputs[0], kuwa2.inputs[0])
+
+        # Kuwahara2 -> Mix B
+        links.new(kuwa2.outputs[0], mix.inputs[7])
+
+        if is_scene_tree:
+            links.new(filt2.outputs[0], viewer.inputs[0])
+
+        self.report({'INFO'}, "Post-Process Paint configuré")
+        return {'FINISHED'}
+    
 # ==========================================
 # 10. PANEL UI : PRÉ-REQUIS SCÈNE
 # ==========================================
 class VIEW3D_PT_paint_prereqs(bpy.types.Panel):
-    """Panel pour afficher et configurer les prérequis de la scène"""
+    """Panel avec 3 étapes de configuration intelligentes"""
     bl_label = "Pré-requis Scène"
     bl_idname = "VIEW3D_PT_paint_prereqs"
     bl_space_type = 'VIEW_3D'
@@ -811,40 +955,67 @@ class VIEW3D_PT_paint_prereqs(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # Color Picker pour background bleu
-        layout.prop(scene, "prereq_bg_color")
-
-        # Vérification des prérequis
-        prereqs = []
-
+        # --- BLOC 1 : RENDU & RT ---
         is_eevee = scene.render.engine == 'BLENDER_EEVEE'
-        prereqs.append(("Moteur Eevee", is_eevee))
-
         is_standard = scene.view_settings.view_transform == 'Standard'
-        prereqs.append(("Color Management Standard", is_standard))
+        is_rt = getattr(scene.eevee, "use_raytracing", getattr(scene.eevee, "use_ssr", False))
+        
+        render_ok = is_eevee and is_standard and is_rt
+        
+        box = layout.box()
+        box.label(text="Moteur & Raytracing", icon='RENDER_RESULT')
+        col = box.column(align=True)
+        col.label(text="Moteur Eevee", icon='CHECKMARK' if is_eevee else 'ERROR')
+        col.label(text="Color Standard", icon='CHECKMARK' if is_standard else 'ERROR')
+        col.label(text="Raytracing", icon='CHECKMARK' if is_rt else 'ERROR')
 
+        if not render_ok:
+            box.operator("scene.setup_render_prereqs", text="Réparer Rendu & RT", icon='TOOL_SETTINGS')
+
+        # --- BLOC 2 : CIEL ---
         world_ok = False
         if scene.world and scene.world.use_nodes:
-            nodes = scene.world.node_tree.nodes
-            node_types = [n.type for n in nodes]
-            world_ok = "LIGHT_PATH" in node_types and "MIX_SHADER" in node_types and node_types.count("BACKGROUND") >= 2
-        prereqs.append(("Shader Ciel correct", world_ok))
-
-        # Affichage
+            node_types = [n.type for n in scene.world.node_tree.nodes]
+            world_ok = "LIGHT_PATH" in node_types and node_types.count("BACKGROUND") >= 2
+        
         box = layout.box()
-        box.label(text="Liste des prérequis :")
-        for name, ok in prereqs:
-            row = box.row()
-            icon = 'CHECKMARK' if ok else 'ERROR'
-            row.label(text=name, icon=icon)
-
-        # Bouton pour appliquer si requis non rempli
-        row = layout.row()
-        if not all(ok for _, ok in prereqs):
-            row.operator("scene.setup_prereqs", icon='FILE_TICK')
+        box.label(text="Environnement Ciel", icon='WORLD')
+        if world_ok:
+            box.label(text="Shader Ciel : OK", icon='CHECKMARK')
+            box.prop(scene, "prereq_bg_color", text="Couleur")
         else:
-            row.label(text="Tout est correct ✅", icon='CHECKMARK')
+            box.operator("scene.setup_sky_shader", text="Appliquer Shader Ciel", icon='STRANDS')
 
+        # --- BLOC 3 : POST-PROCESS (COMPOSITING BLENDER 5.0) ---
+        box = layout.box()
+        box.label(text="Post-Process (Style)", icon='NODE_COMPOSITING')
+
+        comp_enabled = False
+        nt = None
+
+        # Détection version Blender
+        scene = context.scene
+        if bpy.app.version >= (5, 0, 0):
+            if hasattr(scene, "compositing_node_group"):
+                nt = scene.compositing_node_group
+        else:
+            if scene.use_nodes and hasattr(scene, "node_tree"):
+                nt = scene.node_tree
+
+        # Vérification si les nodes de style sont présents dans l'arbre
+        if nt and len(nt.nodes) > 0:
+            node_types = {n.type for n in nt.nodes}
+            if 'KUWAHARA' in node_types or 'FILTER' in node_types:
+                comp_enabled = True
+
+        # Toggle ON/OFF pour activer/désactiver le compositing
+        row = box.row()
+        row.prop(scene, "use_paint_postprocess", text="Activer Post-Process")
+
+        # Si le toggle est activé mais nodes manquants, proposer d'appliquer
+        if scene.use_paint_postprocess and not comp_enabled:
+            box.operator("scene.setup_compositing_prereqs", text="Créer Post-Process", icon='NODETREE')
+            
 # ==========================================
 # 11. PANEL UI : PAINT ORGANIZED
 # ==========================================
@@ -961,6 +1132,22 @@ class PAINTSHADER_OT_import_texture(bpy.types.Operator):
 
 class CustomBrush(bpy.types.PropertyGroup):
     path: bpy.props.StringProperty()
+    
+def toggle_paint_compositing(scene):
+    """Active ou mute les nodes de post-process selon le toggle"""
+    nt = None
+    if bpy.app.version >= (5, 0, 0) and hasattr(scene, "compositing_node_group"):
+        nt = scene.compositing_node_group
+    elif scene.use_nodes and hasattr(scene, "node_tree"):
+        nt = scene.node_tree
+
+    if not nt:
+        return
+
+    for n in nt.nodes:
+        # Mute tous les nodes de style (Kuwahara / Filter)
+        if n.type in {'KUWAHARA', 'FILTER'}:
+            n.mute = not scene.use_paint_postprocess
 
 # ==========================================
 # 12. ENREGISTREMENT DES CLASSES
@@ -970,7 +1157,9 @@ classes = (
     OBJECT_OT_apply_organized_paint,
     OBJECT_OT_remove_organized_paint,
     VIEW3D_PT_paint_organized,
-    OBJECT_OT_setup_scene_prereqs,
+    SCENE_OT_setup_render_prereqs,
+    SCENE_OT_setup_sky_shader,
+    SCENE_OT_setup_compositing_prereqs,
     VIEW3D_PT_paint_prereqs,
     PAINTSHADER_OT_import_texture
 )
@@ -985,6 +1174,14 @@ def register():
     description="Choisissez une texture par défaut",
     update=update_texture
     )
+    
+    bpy.types.Scene.use_paint_postprocess = bpy.props.BoolProperty(
+    name="Activer Post-Process",
+    default=False,
+    description="Active ou désactive le compositing Paint",
+    update=lambda self, context: toggle_paint_compositing(context.scene)
+    )
+
     bpy.app.handlers.depsgraph_update_post.append(sync_brush_selector)
     bpy.types.Scene.custom_brush_textures = bpy.props.CollectionProperty(type=CustomBrush)
 
