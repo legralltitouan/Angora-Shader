@@ -1,4 +1,4 @@
-# 🎨 Angora Shader - v0.0.1 (Pre-Alpha)
+# 🎨 Angora Shader - v0.0.2 (Pre-Alpha)
 
 
 
@@ -57,7 +57,7 @@ A high-end Non-Photorealistic Rendering (NPR) toolkit for **Blender 5.0.0**. Ins
 
 ---
 
-## ⚠️ Pre-Alpha Notes (v0.0.1)
+## ⚠️ Pre-Alpha Notes (v0.0.2)
 
 - **Compatibility:** Optimized for **Blender 5.0.0** and **EEVEE Next**.
 - **Experimental:** This is an early-access build. You may encounter bugs with high-density meshes.
